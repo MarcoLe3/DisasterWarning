@@ -7,6 +7,7 @@ identifying User-Agent, so lookups are serialized and cached in memory.
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 
 import httpx
 from opentelemetry import metrics
@@ -21,12 +22,23 @@ geocode_lookups = meter.create_counter(
     "geocode.lookups", description="Geocoding lookups by result", unit="{lookup}"
 )
 
-_cache: dict[str, tuple[float, float] | None] = {}
+
+@dataclass(frozen=True)
+class GeoResult:
+    lat: float
+    lng: float
+    bbox: tuple[float, float, float, float]  # south, north, west, east
+    country_code: str | None
+    state: str | None
+    county: str | None
+
+
+_cache: dict[str, GeoResult | None] = {}
 _lock = asyncio.Lock()
 _last_request = 0.0
 
 
-async def geocode(place: str) -> tuple[float, float] | None:
+async def geocode(place: str) -> GeoResult | None:
     key = place.strip().lower()
     if key in _cache:
         geocode_lookups.add(1, {"result": "cache_hit"})
@@ -42,7 +54,10 @@ async def geocode(place: str) -> tuple[float, float] | None:
             await asyncio.sleep(wait)
         try:
             async with httpx.AsyncClient(timeout=10, headers={"User-Agent": USER_AGENT}) as client:
-                res = await client.get(NOMINATIM_URL, params={"q": place, "format": "json", "limit": 1})
+                res = await client.get(
+                    NOMINATIM_URL,
+                    params={"q": place, "format": "json", "limit": 1, "addressdetails": 1},
+                )
                 res.raise_for_status()
                 hits = res.json()
         except httpx.HTTPError:
@@ -52,7 +67,20 @@ async def geocode(place: str) -> tuple[float, float] | None:
         finally:
             _last_request = time.monotonic()
 
-        coords = (float(hits[0]["lat"]), float(hits[0]["lon"])) if hits else None
-        _cache[key] = coords
-        geocode_lookups.add(1, {"result": "found" if coords else "not_found"})
-        return coords
+        result = _parse(hits[0]) if hits else None
+        _cache[key] = result
+        geocode_lookups.add(1, {"result": "found" if result else "not_found"})
+        return result
+
+
+def _parse(hit: dict) -> GeoResult:
+    address = hit.get("address") or {}
+    south, north, west, east = (float(v) for v in hit["boundingbox"])
+    return GeoResult(
+        lat=float(hit["lat"]),
+        lng=float(hit["lon"]),
+        bbox=(south, north, west, east),
+        country_code=address.get("country_code"),
+        state=address.get("state"),
+        county=address.get("county"),
+    )

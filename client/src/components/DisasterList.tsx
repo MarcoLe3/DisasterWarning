@@ -24,6 +24,9 @@ export default function DisasterList({ disasters, selectedId, onSelect }: Props)
             {d.location} ({d.precision}) · severity {d.severity}/5 · {d.sources.length} source
             {d.sources.length === 1 ? '' : 's'}
           </div>
+          {d.places.length > 1 && (
+            <div className="meta">Also reported as: {d.places.slice(1).join(', ')}</div>
+          )}
         </li>
       ))}
     </ul>

@@ -42,6 +42,7 @@ class Disaster(BaseModel):
     title: str
     location: str
     precision: LocationPrecision
+    places: list[str]  # every location name merged into this disaster
     lat: float
     lng: float
     severity: int  # 1 (low) - 5 (extreme)

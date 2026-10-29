@@ -32,6 +32,7 @@ export interface Disaster {
   title: string
   location: string
   precision: LocationPrecision
+  places: string[]
   lat: number
   lng: number
   severity: number

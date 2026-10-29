@@ -24,6 +24,7 @@ from app.config import (
 from app.models import Disaster, DisasterType, LocationPrecision, SourcePost, SpreadPoint
 from app.services.classify import classify_posts
 from app.services.geocode import geocode
+from app.services.merge import BASE_RADIUS_KM, PRECISION_RANK, Cluster, merge_clusters
 
 logger = logging.getLogger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -32,16 +33,6 @@ meter = metrics.get_meter(__name__)
 ACTOR_ID = "clockworks~tiktok-scraper"
 RUN_SYNC_URL = f"https://api.apify.com/v2/acts/{ACTOR_ID}/run-sync-get-dataset-items"
 SPREAD_BUCKET = timedelta(hours=6)
-
-# Starting radius reflects how vague the location is
-BASE_RADIUS_KM = {
-    LocationPrecision.address: 0.3,
-    LocationPrecision.neighborhood: 1.0,
-    LocationPrecision.city: 3.0,
-    LocationPrecision.county: 15.0,
-    LocationPrecision.state: 80.0,
-    LocationPrecision.country: 250.0,
-}
 
 apify_runs = meter.create_counter(
     "apify.runs", description="Apify actor runs", unit="{run}"
@@ -159,14 +150,19 @@ async def _group_posts(items: list[dict]) -> list[Disaster]:
                 posts_classified.add(1, {"outcome": "ok", "disaster.type": c.disaster_type.value})
                 groups[(c.disaster_type, c.location)].append((item, c.precision))
 
-        disasters = []
+        clusters = []
         for (dtype, location), posts in groups.items():
-            coords = await geocode(location)
-            if coords is None:
+            geo = await geocode(location)
+            if geo is None:
                 posts_classified.add(len(posts), {"outcome": "geocode_failed"})
                 continue
-            disasters.append(_build_disaster(dtype, location, coords, posts))
+            # Use the most specific precision any post gave for this place
+            precision = min((p for _, p in posts), key=PRECISION_RANK.__getitem__)
+            clusters.append(Cluster(dtype, location, precision, geo, [item for item, _ in posts]))
 
+        merged = merge_clusters(clusters)
+        disasters = [_build_disaster(c) for c in merged]
+        span.set_attribute("disaster.locations", len(clusters))
         span.set_attribute("disaster.count", len(disasters))
         return sorted(disasters, key=lambda d: d.severity, reverse=True)
 
@@ -180,14 +176,7 @@ def _posted_at(item: dict) -> datetime:
     return datetime.min.replace(tzinfo=timezone.utc)
 
 
-def _build_disaster(
-    dtype: DisasterType,
-    location: str,
-    coords: tuple[float, float],
-    posts: list[tuple[dict, LocationPrecision]],
-) -> Disaster:
-    # Use the most specific precision any post gave for this place
-    precision = min((p for _, p in posts), key=lambda p: BASE_RADIUS_KM[p])
+def _build_disaster(cluster: Cluster) -> Disaster:
     sources = sorted(
         (
             SourcePost(
@@ -196,21 +185,23 @@ def _build_disaster(
                 caption=(item.get("text") or "")[:280],
                 posted_at=item.get("createTimeISO") or datetime.now(timezone.utc),
             )
-            for item, _ in posts
+            for item in cluster.posts
         ),
         key=lambda s: s.posted_at,
     )
+    dtype, location = cluster.type, cluster.location
     slug = re.sub(r"[^a-z0-9]+", "-", location.lower()).strip("-")
     return Disaster(
         id=f"{dtype.value}-{slug}",
         type=dtype,
         title=f"{dtype.value.capitalize()} reports in {location}",
         location=location,
-        precision=precision,
-        lat=coords[0],
-        lng=coords[1],
+        precision=cluster.precision,
+        places=cluster.places,
+        lat=cluster.geo.lat,
+        lng=cluster.geo.lng,
         severity=min(5, 1 + len(sources) // 3),
-        spread=_estimate_spread(sources, BASE_RADIUS_KM[precision]),
+        spread=_estimate_spread(sources, BASE_RADIUS_KM[cluster.precision]),
         sources=sources,
     )
 
@@ -256,6 +247,7 @@ def _mock_disasters() -> list[Disaster]:
             title="Brush fire spreading near hillside homes",
             location="Los Angeles, California, USA",
             precision=LocationPrecision.city,
+            places=["Los Angeles, California, USA"],
             lat=34.1184,
             lng=-118.3004,
             severity=4,
@@ -275,6 +267,7 @@ def _mock_disasters() -> list[Disaster]:
             title="Flash flooding on major roads",
             location="Houston, Texas, USA",
             precision=LocationPrecision.city,
+            places=["Houston, Texas, USA"],
             lat=29.7604,
             lng=-95.3698,
             severity=3,
