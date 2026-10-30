@@ -1,0 +1,16 @@
+# Local observability stack: Grafana + Prometheus (metrics) + Tempo (traces)
+# + Loki (logs) + Pyroscope, fronted by an OpenTelemetry Collector.
+#   Grafana:  http://localhost:3000  (admin / admin)
+#   OTLP:     grpc :4317, http :4318
+services:
+  otel-lgtm:
+    image: grafana/otel-lgtm:latest
+    ports:
+      - "3000:3000"
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - lgtm-data:/data
+
+volumes:
+  lgtm-data:
